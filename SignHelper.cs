@@ -344,7 +344,7 @@ namespace OpenKNX.Toolbox.Sign
             string? lSourceLanguageId = lSourceLanguage.Attribute("Identifier")?.Value;
             if(string.IsNullOrEmpty(lSourceLanguageId))
                 throw new Exception("Language Identifier not found in xml");
-            XElement? lTargetLanguage = iLanguageList.Elements("Child").FirstOrDefault(child => child.Attribute("Name")?.Value == lSourceLanguageId);
+            XElement? lTargetLanguage = iLanguageList.FirstOrDefault(lang => lang.Attribute("Identifier")?.Value == lSourceLanguageId);
             if (lTargetLanguage == null)
             {
                 // we create language element
