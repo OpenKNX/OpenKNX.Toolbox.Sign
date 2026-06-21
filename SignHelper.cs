@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Xml;
 using System.Xml.Linq;
@@ -8,6 +9,9 @@ namespace OpenKNX.Toolbox.Sign
 {
     public class SignHelper
     {
+        private static readonly bool IsWindows =
+            RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+
         private enum DocumentCategory
         {
             None,
@@ -129,7 +133,45 @@ namespace OpenKNX.Toolbox.Sign
             CatalogIdPatcher cip = new CatalogIdPatcher(catalogFileInfo, hardware2ProgramIdMapping, iPathETS, ns);
             cip.Patch();
 
-            XmlSigning.SignDirectory(Path.Combine(outputFolder, manuId), iPathETS);
+            var manuDir = Path.Combine(outputFolder, manuId);
+
+            // macOS/Linux only: align the files with what ETS expects when it
+            // re-validates the signature on Windows. Not needed on Windows.
+            if (!IsWindows)
+            {
+                NormalizeXmlForSigning(manuDir);      // CRLF + UTF-8 BOM
+                FlattenBaggagesToBackslash(manuDir);  // Windows-style "\" relative paths
+            }
+
+            XmlSigning.SignDirectory(manuDir, iPathETS);
+        }
+
+        private static void FlattenBaggagesToBackslash(string manuDir)
+        {
+            string bagDir = Path.Combine(manuDir, "Baggages");
+            if (!Directory.Exists(bagDir)) return;
+
+            foreach (string file in Directory.GetFiles(bagDir, "*", SearchOption.AllDirectories))
+            {
+                // e.g. "Baggages/AD/00/03/ets.png" -> "Baggages\AD\00\03\ets.png"
+                string rel = Path.GetRelativePath(manuDir, file);
+                string flatName = rel.Replace(Path.DirectorySeparatorChar, '\\');
+                // "\" stays part of the file name on macOS/Linux -> a single flat file
+                string dest = Path.Combine(manuDir, flatName);
+                File.Move(file, dest, overwrite: true);
+            }
+
+            Directory.Delete(bagDir, true);
+        }
+
+        private static void NormalizeXmlForSigning(string folder)
+        {
+            foreach (string file in Directory.GetFiles(folder, "*.xml"))
+            {
+                string text = File.ReadAllText(file);
+                text = text.Replace("\r\n", "\n").Replace("\n", "\r\n");  // -> CRLF
+                File.WriteAllText(file, text, new System.Text.UTF8Encoding(true));
+            }
         }
 
         public static void ZipFolder(string outputFolder, string outputFile)
