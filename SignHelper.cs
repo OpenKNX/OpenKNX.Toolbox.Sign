@@ -135,15 +135,18 @@ namespace OpenKNX.Toolbox.Sign
 
             var manuDir = Path.Combine(outputFolder, manuId);
 
-            // macOS/Linux only: align the files with what ETS expects when it
-            // re-validates the signature on Windows. Not needed on Windows.
+            // macOS/Linux: make the files match the Windows layout before signing.
             if (!IsWindows)
             {
                 NormalizeXmlForSigning(manuDir);      // CRLF + UTF-8 BOM
-                FlattenBaggagesToBackslash(manuDir);  // Windows-style "\" relative paths
+                FlattenBaggagesToBackslash(manuDir);  // "\" relative paths
             }
 
             XmlSigning.SignDirectory(manuDir, iPathETS);
+
+            // restore real Baggages subdirectories after signing (keeps signature valid)
+            if (!IsWindows)
+                RestoreBaggagesFromBackslash(manuDir);
         }
 
         private static void FlattenBaggagesToBackslash(string manuDir)
@@ -151,17 +154,26 @@ namespace OpenKNX.Toolbox.Sign
             string bagDir = Path.Combine(manuDir, "Baggages");
             if (!Directory.Exists(bagDir)) return;
 
+            // "Baggages/AD/00/03/ets.png" -> flat file "Baggages\AD\00\03\ets.png"
             foreach (string file in Directory.GetFiles(bagDir, "*", SearchOption.AllDirectories))
             {
-                // e.g. "Baggages/AD/00/03/ets.png" -> "Baggages\AD\00\03\ets.png"
-                string rel = Path.GetRelativePath(manuDir, file);
-                string flatName = rel.Replace(Path.DirectorySeparatorChar, '\\');
-                // "\" stays part of the file name on macOS/Linux -> a single flat file
-                string dest = Path.Combine(manuDir, flatName);
+                string flatName = Path.GetRelativePath(manuDir, file).Replace(Path.DirectorySeparatorChar, '\\');
+                File.Move(file, Path.Combine(manuDir, flatName), overwrite: true);
+            }
+            Directory.Delete(bagDir, true);
+        }
+
+        // "Baggages\AD\00\03\ets.png" flat files -> real Baggages/AD/00/03/ subdirectories
+        private static void RestoreBaggagesFromBackslash(string manuDir)
+        {
+            foreach (string file in Directory.GetFiles(manuDir))
+            {
+                string name = Path.GetFileName(file);
+                if (!name.Contains('\\')) continue;
+                string dest = Path.Combine(manuDir, name.Replace('\\', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(dest));
                 File.Move(file, dest, overwrite: true);
             }
-
-            Directory.Delete(bagDir, true);
         }
 
         private static void NormalizeXmlForSigning(string folder)
