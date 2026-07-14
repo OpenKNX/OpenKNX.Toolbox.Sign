@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Xml;
 using System.Xml.Linq;
@@ -8,6 +9,9 @@ namespace OpenKNX.Toolbox.Sign
 {
     public class SignHelper
     {
+        private static readonly bool IsWindows =
+            RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+
         private enum DocumentCategory
         {
             None,
@@ -31,6 +35,8 @@ namespace OpenKNX.Toolbox.Sign
             string outputFolder = AppDomain.CurrentDomain.BaseDirectory;
             if(Directory.Exists(Path.Combine(outputFolder, "Storage")))
                 outputFolder = Path.Combine(outputFolder, "Storage", "Temp");
+            else if (!IsWindows)
+                outputFolder = Path.Combine(Path.GetTempPath(), "OpenKNXproducer", "Temp");
             else
                 outputFolder = Path.Combine(outputFolder, "Temp");
 
@@ -129,7 +135,57 @@ namespace OpenKNX.Toolbox.Sign
             CatalogIdPatcher cip = new CatalogIdPatcher(catalogFileInfo, hardware2ProgramIdMapping, iPathETS, ns);
             cip.Patch();
 
-            XmlSigning.SignDirectory(Path.Combine(outputFolder, manuId), iPathETS);
+            var manuDir = Path.Combine(outputFolder, manuId);
+
+            // macOS/Linux: make the files match the Windows layout before signing.
+            if (!IsWindows)
+            {
+                NormalizeXmlForSigning(manuDir);      // CRLF + UTF-8 BOM
+                FlattenBaggagesToBackslash(manuDir);  // "\" relative paths
+            }
+
+            XmlSigning.SignDirectory(manuDir, iPathETS);
+
+            // restore real Baggages subdirectories after signing (keeps signature valid)
+            if (!IsWindows)
+                RestoreBaggagesFromBackslash(manuDir);
+        }
+
+        private static void FlattenBaggagesToBackslash(string manuDir)
+        {
+            string bagDir = Path.Combine(manuDir, "Baggages");
+            if (!Directory.Exists(bagDir)) return;
+
+            // "Baggages/AD/00/03/ets.png" -> flat file "Baggages\AD\00\03\ets.png"
+            foreach (string file in Directory.GetFiles(bagDir, "*", SearchOption.AllDirectories))
+            {
+                string flatName = Path.GetRelativePath(manuDir, file).Replace(Path.DirectorySeparatorChar, '\\');
+                File.Move(file, Path.Combine(manuDir, flatName), overwrite: true);
+            }
+            Directory.Delete(bagDir, true);
+        }
+
+        // "Baggages\AD\00\03\ets.png" flat files -> real Baggages/AD/00/03/ subdirectories
+        private static void RestoreBaggagesFromBackslash(string manuDir)
+        {
+            foreach (string file in Directory.GetFiles(manuDir))
+            {
+                string name = Path.GetFileName(file);
+                if (!name.Contains('\\')) continue;
+                string dest = Path.Combine(manuDir, name.Replace('\\', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(dest));
+                File.Move(file, dest, overwrite: true);
+            }
+        }
+
+        private static void NormalizeXmlForSigning(string folder)
+        {
+            foreach (string file in Directory.GetFiles(folder, "*.xml"))
+            {
+                string text = File.ReadAllText(file);
+                text = text.Replace("\r\n", "\n").Replace("\n", "\r\n");  // -> CRLF
+                File.WriteAllText(file, text, new System.Text.UTF8Encoding(true));
+            }
         }
 
         public static void ZipFolder(string outputFolder, string outputFile)
