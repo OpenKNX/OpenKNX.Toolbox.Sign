@@ -35,6 +35,8 @@ namespace OpenKNX.Toolbox.Sign
             string outputFolder = AppDomain.CurrentDomain.BaseDirectory;
             if(Directory.Exists(Path.Combine(outputFolder, "Storage")))
                 outputFolder = Path.Combine(outputFolder, "Storage", "Temp");
+            else if (!IsWindows)
+                outputFolder = Path.Combine(Path.GetTempPath(), "OpenKNXproducer", "Temp");
             else
                 outputFolder = Path.Combine(outputFolder, "Temp");
 
