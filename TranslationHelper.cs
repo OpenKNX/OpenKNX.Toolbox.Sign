@@ -1,5 +1,7 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 
 namespace OpenKNX.Toolbox.Sign;
@@ -34,7 +36,8 @@ public static class TranslationHelper
     {
         "Enumeration", "Parameter", "ParameterRef", "ComObject", "ComObjectRef",
         "Channel", "ChannelIndependentBlock", "CatalogSection", "CatalogItem",
-        "Product", "Message"
+        "Product", "Message", "ParameterBlock", "ParameterSeparator", "Button",
+        "Row", "Column", "ApplicationProgram", "Hardware"
     };
 
     private static readonly HashSet<string> TranslatableAttributes = new(StringComparer.OrdinalIgnoreCase)
@@ -45,9 +48,12 @@ public static class TranslationHelper
     /// <summary>
     /// Loads translation dictionaries from a JSON file or directory of JSON files.
     /// Each JSON file should have a "translations" object mapping source text to target text.
+    /// Files are merged in ordinal path order, with later files overriding earlier ones.
+    /// Explicitly requested missing or invalid inputs throw; empty string values are skipped.
     /// </summary>
     public static Dictionary<string, string> LoadTranslations(string translationsPath)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(translationsPath);
         var merged = new Dictionary<string, string>();
         var files = new List<string>();
 
@@ -58,26 +64,34 @@ public static class TranslationHelper
         else if (Directory.Exists(translationsPath))
         {
             files.AddRange(Directory.GetFiles(translationsPath, "*.json", SearchOption.AllDirectories));
+            if (files.Count == 0)
+                throw new InvalidDataException($"No translation JSON files found in '{translationsPath}'.");
         }
+        else
+            throw new FileNotFoundException($"Translation path does not exist: '{translationsPath}'.", translationsPath);
 
-        foreach (string file in files)
+        foreach (string file in files.OrderBy(file => file, StringComparer.Ordinal))
         {
+            TranslationFile? translationFile;
             try
             {
                 string json = File.ReadAllText(file);
-                var translationFile = JsonSerializer.Deserialize<TranslationFile>(json);
-                if (translationFile?.Translations != null)
-                {
-                    foreach (var (key, value) in translationFile.Translations)
-                    {
-                        if (!string.IsNullOrEmpty(value))
-                            merged[key] = value;
-                    }
-                }
+                translationFile = JsonSerializer.Deserialize<TranslationFile>(json);
             }
-            catch (Exception ex)
+            catch (JsonException ex)
             {
-                Console.WriteLine("Warning: Failed to load translations from {0}: {1}", file, ex.Message);
+                throw new InvalidDataException($"Invalid translation JSON in '{file}': {ex.Message}", ex);
+            }
+
+            if (translationFile?.Translations == null)
+                throw new InvalidDataException($"Translation file '{file}' must contain a 'translations' object.");
+
+            foreach (var (key, value) in translationFile.Translations)
+            {
+                if (value == null)
+                    throw new InvalidDataException($"Translation for '{key}' in '{file}' must be a string, not null.");
+                if (value.Length > 0)
+                    merged[key] = value;
             }
         }
         return merged;
@@ -86,6 +100,10 @@ public static class TranslationHelper
     /// <summary>
     /// Injects translation elements into the XML document's Languages block.
     /// Operates on the XDocument in memory — does not modify any file on disk.
+    /// Exact keys take precedence over full-string %N%, %C%, and %Z% templates.
+    /// Templates require literal text and unambiguous separators, preserve captured
+    /// values and ETS runtime syntax, and throw on ambiguous matches or mismatched tokens.
+    /// Other producer macros are exact-only; no build context is inferred.
     /// </summary>
     public static void InjectTranslations(XDocument xdoc, Dictionary<string, string> translations, string languageIdentifier = "en-US")
     {
@@ -112,7 +130,8 @@ public static class TranslationHelper
         var translationUnits = new Dictionary<string, List<(string refId, string attrName, string text)>>();
         int count = 0;
 
-        CollectTranslatableElements(xdoc.Root, translations, translationUnits, ref count);
+        var matcher = new TranslationMatcher(translations);
+        CollectTranslatableElements(xdoc.Root, matcher, translationUnits, ref count);
 
         if (count == 0)
         {
@@ -181,7 +200,7 @@ public static class TranslationHelper
     }
 
     private static void CollectTranslatableElements(XElement element,
-        Dictionary<string, string> translations,
+        TranslationMatcher matcher,
         Dictionary<string, List<(string refId, string attrName, string text)>> translationUnits,
         ref int count)
     {
@@ -194,7 +213,8 @@ public static class TranslationHelper
                 {
                     if (TranslatableAttributes.Contains(attr.Name.LocalName) && !string.IsNullOrEmpty(attr.Value))
                     {
-                        if (translations.TryGetValue(attr.Value, out string? translatedText))
+                        string? translatedText = matcher.Translate(attr.Value);
+                        if (translatedText != null)
                         {
                             string? unitRefId = GetTranslationUnitRefId(element);
                             if (!string.IsNullOrEmpty(unitRefId))
@@ -211,7 +231,83 @@ public static class TranslationHelper
         }
 
         foreach (XElement child in element.Elements())
-            CollectTranslatableElements(child, translations, translationUnits, ref count);
+            CollectTranslatableElements(child, matcher, translationUnits, ref count);
+    }
+
+    private sealed class TranslationMatcher
+    {
+        private static readonly Regex Placeholder = new(@"%[A-Za-z][A-Za-z0-9_+\-*]*%",
+            RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+        private readonly Dictionary<string, string> translations;
+        private readonly List<(string source, string target, Regex pattern, string[] tokens)> templates = new();
+        private readonly Dictionary<string, string?> cache = new(StringComparer.Ordinal);
+
+        public TranslationMatcher(Dictionary<string, string> translations)
+        {
+            this.translations = translations;
+            foreach (var (source, target) in translations)
+            {
+                var matches = Placeholder.Matches(source).Cast<Match>().ToArray();
+                if (matches.Length == 0 || matches.Any(m => m.Value is not ("%N%" or "%C%" or "%Z%")))
+                    continue;
+
+                // Numeric/letter captures alone are too broad. Require literal prose and
+                // separators between placeholders; all other producer macros stay exact-only.
+                if (!Placeholder.Replace(source, "").Any(char.IsLetter) ||
+                    matches.Zip(matches.Skip(1)).Any(pair =>
+                        !source[(pair.First.Index + pair.First.Length)..pair.Second.Index]
+                            .Any(c => !char.IsAsciiDigit(c) && c is not (>= 'A' and <= 'Z'))))
+                    continue;
+
+                string[] tokens = matches.Select(m => m.Value).Distinct().ToArray();
+                var targetTokens = Placeholder.Matches(target).Select(m => m.Value).ToHashSet();
+                if (!targetTokens.SetEquals(tokens))
+                    throw new InvalidDataException($"Translation template '{source}' must preserve its build placeholders.");
+
+                var pattern = new StringBuilder(@"\A");
+                var seen = new HashSet<string>();
+                int offset = 0;
+                foreach (var match in matches)
+                {
+                    pattern.Append(Regex.Escape(source[offset..match.Index]));
+                    string group = match.Value[1..^1];
+                    pattern.Append(seen.Add(group)
+                        ? $"(?<{group}>{(group == "Z" ? "[A-Z]" : "[1-9][0-9]{0,9}")})"
+                        : $@"\k<{group}>");
+                    offset = match.Index + match.Length;
+                }
+                pattern.Append(Regex.Escape(source[offset..])).Append(@"\z");
+                templates.Add((source, target, new Regex(pattern.ToString(),
+                    RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture, TimeSpan.FromSeconds(1)), tokens));
+            }
+        }
+
+        public string? Translate(string source)
+        {
+            if (translations.TryGetValue(source, out string? exact))
+                return exact;
+            if (cache.TryGetValue(source, out string? cached))
+                return cached;
+
+            string? result = null;
+            string? matchedTemplate = null;
+            foreach (var template in templates)
+            {
+                Match match = template.pattern.Match(source);
+                if (!match.Success || template.tokens.Any(token =>
+                    token != "%Z%" && !int.TryParse(match.Groups[token[1..^1]].Value, out _)))
+                    continue;
+
+                if (matchedTemplate != null)
+                    throw new InvalidDataException(
+                        $"Ambiguous translation for '{source}': templates '{matchedTemplate}' and '{template.source}'.");
+
+                matchedTemplate = template.source;
+                result = Placeholder.Replace(template.target, token => match.Groups[token.Value[1..^1]].Value);
+            }
+            cache[source] = result;
+            return result;
+        }
     }
 
     /// <summary>

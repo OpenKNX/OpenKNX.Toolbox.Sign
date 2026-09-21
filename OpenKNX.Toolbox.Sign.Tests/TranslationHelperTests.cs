@@ -101,60 +101,96 @@ public class TranslationHelperTests : IDisposable
     [Fact]
     public void LoadTranslations_LaterFilesOverrideEarlier()
     {
-        // When same key appears in multiple files, last-write-wins
         string subdir = Path.Combine(_tempDir, "multi");
         Directory.CreateDirectory(subdir);
 
-        WriteTempJson(Path.Combine(subdir, "a.json"), new
-        {
-            translations = new Dictionary<string, string> { ["Key"] = "First" }
-        });
         WriteTempJson(Path.Combine(subdir, "b.json"), new
         {
             translations = new Dictionary<string, string> { ["Key"] = "Second" }
         });
-
-        var result = TranslationHelper.LoadTranslations(subdir);
-
-        // Both are valid — we just assert it picks one consistently
-        Assert.Single(result);
-        Assert.Contains(result["Key"], new[] { "First", "Second" });
-    }
-
-    [Fact]
-    public void LoadTranslations_NonexistentPath_ReturnsEmpty()
-    {
-        var result = TranslationHelper.LoadTranslations(Path.Combine(_tempDir, "does-not-exist.json"));
-
-        Assert.Empty(result);
-    }
-
-    [Fact]
-    public void LoadTranslations_MalformedJson_SkipsAndContinues()
-    {
-        string subdir = Path.Combine(_tempDir, "mixed");
-        Directory.CreateDirectory(subdir);
-
-        File.WriteAllText(Path.Combine(subdir, "bad.json"), "NOT VALID JSON {{{");
-        WriteTempJson(Path.Combine(subdir, "good.json"), new
+        WriteTempJson(Path.Combine(subdir, "a.json"), new
         {
-            translations = new Dictionary<string, string> { ["OK"] = "Fine" }
+            translations = new Dictionary<string, string> { ["Key"] = "First" }
         });
 
         var result = TranslationHelper.LoadTranslations(subdir);
 
         Assert.Single(result);
-        Assert.Equal("Fine", result["OK"]);
+        Assert.Equal("Second", result["Key"]);
     }
 
     [Fact]
-    public void LoadTranslations_NoTranslationsProperty_ReturnsEmpty()
+    public void LoadTranslations_NonexistentPath_Throws()
+    {
+        string path = Path.Combine(_tempDir, "does-not-exist.json");
+        var error = Assert.Throws<FileNotFoundException>(() => TranslationHelper.LoadTranslations(path));
+        Assert.Equal(path, error.FileName);
+    }
+
+    [Fact]
+    public void LoadTranslations_MalformedJson_RejectsEntireDirectory()
+    {
+        string subdir = Path.Combine(_tempDir, "mixed");
+        Directory.CreateDirectory(subdir);
+
+        string badFile = Path.Combine(subdir, "z-bad.json");
+        File.WriteAllText(badFile, "NOT VALID JSON {{{");
+        WriteTempJson(Path.Combine(subdir, "a-good.json"), new
+        {
+            translations = new Dictionary<string, string> { ["OK"] = "Fine" }
+        });
+
+        var error = Assert.Throws<InvalidDataException>(() => TranslationHelper.LoadTranslations(subdir));
+        Assert.Contains(badFile, error.Message);
+        Assert.IsType<System.Text.Json.JsonException>(error.InnerException);
+    }
+
+    [Fact]
+    public void LoadTranslations_NoTranslationsProperty_Throws()
     {
         string file = WriteTempJson("notranslations.json", new { other = "data" });
 
-        var result = TranslationHelper.LoadTranslations(file);
+        var error = Assert.Throws<InvalidDataException>(() => TranslationHelper.LoadTranslations(file));
+        Assert.Contains(file, error.Message);
+    }
 
-        Assert.Empty(result);
+    [Theory]
+    [InlineData("null")]
+    [InlineData("{\"translations\":null}")]
+    [InlineData("{\"translations\":[]}")]
+    [InlineData("{\"translations\":{\"Valid\":\"English\",\"Invalid\":17}}")]
+    [InlineData("{\"translations\":{\"Invalid\":null}}")]
+    [InlineData("{\"translations\":{\"Invalid\":true}}")]
+    public void LoadTranslations_InvalidStructure_ThrowsWithFilename(string json)
+    {
+        string file = Path.Combine(_tempDir, "invalid.json");
+        File.WriteAllText(file, json);
+
+        var error = Assert.Throws<InvalidDataException>(() => TranslationHelper.LoadTranslations(file));
+
+        Assert.Contains(file, error.Message);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("bad\0path")]
+    public void LoadTranslations_InvalidExplicitPath_Throws(string path)
+    {
+        Assert.ThrowsAny<Exception>(() => TranslationHelper.LoadTranslations(path));
+    }
+
+    [Fact]
+    public void LoadTranslations_DirectoryWithoutJson_Throws()
+    {
+        Assert.Throws<InvalidDataException>(() => TranslationHelper.LoadTranslations(_tempDir));
+    }
+
+    [Fact]
+    public void LoadTranslations_ExplicitEmptyDictionary_IsValid()
+    {
+        string file = WriteTempJson("empty.json", new { translations = new Dictionary<string, string>() });
+        Assert.Empty(TranslationHelper.LoadTranslations(file));
     }
 
     #endregion
@@ -399,7 +435,8 @@ public class TranslationHelperTests : IDisposable
     public void InjectTranslations_AllTranslatableElementTypes_AreFound()
     {
         string[] elementTypes = { "Enumeration", "Parameter", "ParameterRef", "ComObject",
-            "ComObjectRef", "Channel", "ChannelIndependentBlock", "Message" };
+            "ComObjectRef", "Channel", "ChannelIndependentBlock", "Message",
+            "ParameterBlock", "ParameterSeparator", "Button", "Row", "Column" };
 
         foreach (string elemType in elementTypes)
         {

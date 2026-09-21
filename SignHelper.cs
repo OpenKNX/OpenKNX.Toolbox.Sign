@@ -28,6 +28,9 @@ namespace OpenKNX.Toolbox.Sign
 
         public static void ExportKnxprod(string iWorkingDir, string iKnxprodFileName, string lTempXmlFileName, string iXsdFileName, bool iIsDebug, bool iAutoXsd, string iBaggagesDirName, string translationsPath = "")
         {
+            var translations = string.IsNullOrEmpty(translationsPath)
+                ? null
+                : TranslationHelper.LoadTranslations(translationsPath);
             string outputFolder = AppDomain.CurrentDomain.BaseDirectory;
             if(Directory.Exists(Path.Combine(outputFolder, "Storage")))
                 outputFolder = Path.Combine(outputFolder, "Storage", "Temp");
@@ -45,32 +48,7 @@ namespace OpenKNX.Toolbox.Sign
             Directory.CreateDirectory(outputFolder);
             Directory.CreateDirectory(Path.Combine(outputFolder, manuId));
 
-            // Inject translations if available (operates on a temp copy, never modifies original)
-            string xmlToProcess = lTempXmlFileName;
-            string? translatedTempFile = null;
-            if (!string.IsNullOrEmpty(translationsPath))
-            {
-                var translations = TranslationHelper.LoadTranslations(translationsPath);
-                if (translations.Count > 0)
-                {
-                    string xmlContent = File.ReadAllText(lTempXmlFileName);
-                    XDocument xdoc = XDocument.Parse(xmlContent);
-                    TranslationHelper.InjectTranslations(xdoc, translations);
-                    translatedTempFile = Path.GetTempFileName();
-                    xdoc.Save(translatedTempFile);
-                    xmlToProcess = translatedTempFile;
-                }
-            }
-
-            try
-            {
-                SplitXml(xmlToProcess, outputFolder);
-            }
-            finally
-            {
-                if (translatedTempFile != null && File.Exists(translatedTempFile))
-                    File.Delete(translatedTempFile);
-            }
+            SplitXml(lTempXmlFileName, outputFolder, translations);
 
             string iBaggageName = Path.GetFileName(iBaggagesDirName);
             string[] baggageDirs = Directory.GetDirectories(iWorkingDir, "*.baggages");
@@ -193,13 +171,15 @@ namespace OpenKNX.Toolbox.Sign
             File.Copy(Path.Combine(basePath, "Masters", $"project-{ns}.xml"), Path.Combine(outputFolder, $"knx_master.xml"));
         }
 
-        private static void SplitXml(string lTempXmlFileName, string outputFolder)
+        private static void SplitXml(string lTempXmlFileName, string outputFolder, Dictionary<string, string>? translations = null)
         {
             //if (ValidateXsd(iWorkingDir, lTempXmlFileName, lTempXmlFileName, iXsdFileName, iAutoXsd)) return 1;
 
             XDocument? xdoc = null;
             string xmlContent = File.ReadAllText(lTempXmlFileName);
             xdoc = XDocument.Parse(xmlContent, LoadOptions.SetLineInfo);
+            if (translations?.Count > 0)
+                TranslationHelper.InjectTranslations(xdoc, translations);
 
             XNode? lXmlModel = xdoc.FirstNode;
             if (lXmlModel != null && lXmlModel.NodeType == XmlNodeType.ProcessingInstruction)
